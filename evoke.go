@@ -11,20 +11,21 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	_ "modernc.org/sqlite"
 )
 
 type Event struct {
 	EventID       int       `db:"event_id"`
 	CreatedAt     time.Time `db:"created_at"`
-	AggregateType string    `db:"aggregate_type"`
 	AggregateID   string    `db:"aggregate_id"`
+	AggregateType string    `db:"aggregate_type"`
 	EventType     string    `db:"event_type"`
 	EventData     []byte    `db:"event_data"`
 }
 
 type Service struct {
 	db       *sqlx.DB
-	handlers map[string][]HandlerFunc
+	handlers map[string][]*HandlerFunc
 	Config   *Config
 }
 
@@ -49,15 +50,15 @@ func NewStore(config Config) (*Service, error) {
 
 	// Enable WAL mode for better concurrency and durability
 	if _, err := db.Exec(`PRAGMA journal_mode = WAL;`); err != nil {
-		return nil, fmt.Errorf("failed to enable WAL mode:", err)
+		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
 
 	// Optional performance pragmas (tweak based on needs):
 	if _, err := db.Exec(`PRAGMA synchronous = NORMAL;`); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to set synchronous: %w", err)
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to enable foreign_keys: %w", err)
 	}
 
 	if _, err := db.Exec(`
@@ -70,7 +71,7 @@ func NewStore(config Config) (*Service, error) {
                         event_data text not null
 		);
 	`); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create events table: %w", err)
 	}
 
 	sqlxDB := sqlx.NewDb(db, "sqlite3")
@@ -78,7 +79,7 @@ func NewStore(config Config) (*Service, error) {
 	return &Service{
 		db:       sqlxDB,
 		Config:   &config,
-		handlers: make(map[string][]HandlerFunc),
+		handlers: make(map[string][]*HandlerFunc),
 	}, nil
 }
 
@@ -87,13 +88,13 @@ func (s *Service) Close() error {
 }
 
 // Event payloads must implement this interface
-type EventDefiner interface {
+type EventDefinition interface {
 	EventType() string
 	Aggregate() string
 }
 
 type Inserter interface {
-	Insert(aggregateID string, def EventDefiner) error
+	Insert(aggregateID string, def EventDefinition) error
 	GetAggregateID(prefix string) (string, error)
 }
 
@@ -104,20 +105,12 @@ type ExecGetter interface {
 
 type HandlerFunc func(event Event, inserter Inserter, replay bool) error
 
-func (s *Service) Subscribe(ed EventDefiner, handler HandlerFunc) {
-	s.handlers[ed.EventType()] = append(s.handlers[ed.EventType()], handler)
-}
+// Subscribe to event
+func (s *Service) Subscribe(payload EventDefinition, handler HandlerFunc) error {
+	key := payload.EventType()
+	s.handlers[key] = append(s.handlers[key], &handler)
 
-type Subscriber interface {
-	Subscribe(EventDefiner, HandlerFunc)
-}
-
-type ProjectionRegisterer interface {
-	Register(Subscriber)
-}
-
-func (s *Service) RegisterProjection(projection ProjectionRegisterer) {
-	projection.Register(s)
+	return nil
 }
 
 func (s *Service) GetAggregateIDs(prefix string) ([]string, error) {
@@ -170,7 +163,7 @@ func (s *Service) LoadAllEvents(reverse bool) ([]Event, error) {
 	return events, nil
 }
 
-func (s *Service) insertTx(e ExecGetter, aggregateID string, payload EventDefiner) error {
+func (s *Service) insertTx(e ExecGetter, aggregateID string, payload EventDefinition) error {
 	bytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("json.Marshal: %w", err)
@@ -193,7 +186,7 @@ func (s *Service) insertTx(e ExecGetter, aggregateID string, payload EventDefine
 	return nil
 }
 
-func (s *Service) Insert(aggregateID string, payload EventDefiner) error {
+func (s *Service) Insert(aggregateID string, payload EventDefinition) error {
 	tx, err := s.db.Beginx()
 	if err != nil {
 		return fmt.Errorf("Begin: %w", err)
@@ -213,7 +206,7 @@ type InsertTxWrapper struct {
 	s *Service
 }
 
-func (i InsertTxWrapper) Insert(aggregateID string, payload EventDefiner) error {
+func (i InsertTxWrapper) Insert(aggregateID string, payload EventDefinition) error {
 	return i.s.insertTx(i.e, aggregateID, payload)
 }
 
@@ -224,13 +217,14 @@ func (i InsertTxWrapper) GetAggregateID(prefix string) (string, error) {
 func (s *Service) runEventHandlers(e ExecGetter, event Event, replay bool) error {
 	if handlers, ok := s.handlers[event.EventType]; ok {
 		inserter := InsertTxWrapper{e: e, s: s}
-		for _, handle := range handlers {
-			err := handle(event, inserter, replay)
+		for _, handler := range handlers {
+			err := (*handler)(event, inserter, replay)
 			if err != nil {
 				return fmt.Errorf("handler for %s failed: %w", event.EventType, err)
 			}
 		}
 	}
+
 	return nil
 }
 
