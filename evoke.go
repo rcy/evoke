@@ -23,10 +23,29 @@ type Event struct {
 	EventData     []byte    `db:"event_data"`
 }
 
+type SagaInstance struct {
+	SagaInstanceID int       `db:"saga_instance_id"`
+	CreatedAt      time.Time `db:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at"`
+	EventID        int       `db:"event_id"`
+	SagaName       string    `db:"saga_name"`
+	Status         string    `db:"status"`
+	LastError      string    `db:"lastError"`
+}
+
+type SagaHandler struct {
+	Name        string
+	HandlerFunc HandlerFunc
+}
+
 type Service struct {
-	db       *sqlx.DB
+	db     *sqlx.DB
+	Config *Config
+
+	// handlers that run inside the event insertion transaction (necessary projections)
 	handlers map[string][]*HandlerFunc
-	Config   *Config
+	// handlers that run outside the event insertion transiaction (ie sagas)
+	xhandlers map[string][]*SagaHandler
 }
 
 type Config struct {
@@ -74,12 +93,27 @@ func NewStore(config Config) (*Service, error) {
 		return nil, fmt.Errorf("failed to create events table: %w", err)
 	}
 
+	if _, err := db.Exec(`
+		create table if not exists saga_instances (
+                        saga_instance_id integer primary key autoincrement,
+                        created_at timestamp not null default current_timestamp,
+                        updated_at timestamp not null default current_timestamp,
+                        event_id text not null,
+                        saga_name text not null,
+                        status text not null,
+                        last_error text
+		);
+	`); err != nil {
+		return nil, fmt.Errorf("failed to create saga_instances table: %w", err)
+	}
+
 	sqlxDB := sqlx.NewDb(db, "sqlite3")
 
 	return &Service{
-		db:       sqlxDB,
-		Config:   &config,
-		handlers: make(map[string][]*HandlerFunc),
+		db:        sqlxDB,
+		Config:    &config,
+		handlers:  make(map[string][]*HandlerFunc),
+		xhandlers: make(map[string][]*SagaHandler),
 	}, nil
 }
 
@@ -103,14 +137,18 @@ type ExecGetter interface {
 	Get(dest interface{}, query string, args ...interface{}) error
 }
 
-type HandlerFunc func(event Event, inserter Inserter, replay bool) error
+type HandlerFunc func(event Event, replay bool) error
 
-// Subscribe to event
-func (s *Service) Subscribe(payload EventDefinition, handler HandlerFunc) error {
+// Subscribe to event and have handler run inside event insert transaction
+func (s *Service) SubscribeSync(payload EventDefinition, handler HandlerFunc) {
 	key := payload.EventType()
 	s.handlers[key] = append(s.handlers[key], &handler)
+}
 
-	return nil
+// Subscribe to event and have handler run outside event insert transaction
+func (s *Service) Subscribe(name string, payload EventDefinition, handler HandlerFunc) {
+	key := payload.EventType()
+	s.xhandlers[key] = append(s.xhandlers[key], &SagaHandler{Name: name, HandlerFunc: handler})
 }
 
 func (s *Service) GetAggregateIDs(prefix string) ([]string, error) {
@@ -163,14 +201,20 @@ func (s *Service) LoadAllEvents(reverse bool) ([]Event, error) {
 	return events, nil
 }
 
-func (s *Service) insertTx(e ExecGetter, aggregateID string, payload EventDefinition) error {
+func (s *Service) Insert(aggregateID string, payload EventDefinition) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("Begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	bytes, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("json.Marshal: %w", err)
 	}
 
 	var event Event
-	err = e.Get(&event, `insert into events(aggregate_id, aggregate_type, event_type, event_data) values (?,?,?,?) returning *`,
+	err = tx.Get(&event, `insert into events(aggregate_id, aggregate_type, event_type, event_data) values (?,?,?,?) returning *`,
 		aggregateID,
 		payload.Aggregate(),
 		payload.EventType(),
@@ -179,48 +223,59 @@ func (s *Service) insertTx(e ExecGetter, aggregateID string, payload EventDefini
 		return fmt.Errorf("db.Exec: %w", err)
 	}
 
-	err = s.runEventHandlers(e, event, false)
+	err = s.runEventHandlers(event, false)
 	if err != nil {
 		return err
 	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("Commit: %w", err)
+	}
+
+	err = s.xrunEventHandlers(event, false)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (s *Service) Insert(aggregateID string, payload EventDefinition) error {
-	tx, err := s.db.Beginx()
-	if err != nil {
-		return fmt.Errorf("Begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	err = s.insertTx(tx, aggregateID, payload)
-	if err != nil {
-		return fmt.Errorf("InsertTx: %w", err)
-	}
-
-	return tx.Commit()
-}
-
-type InsertTxWrapper struct {
-	e ExecGetter
-	s *Service
-}
-
-func (i InsertTxWrapper) Insert(aggregateID string, payload EventDefinition) error {
-	return i.s.insertTx(i.e, aggregateID, payload)
-}
-
-func (i InsertTxWrapper) GetAggregateID(prefix string) (string, error) {
-	return i.s.GetAggregateID(prefix)
-}
-
-func (s *Service) runEventHandlers(e ExecGetter, event Event, replay bool) error {
+func (s *Service) runEventHandlers(event Event, replay bool) error {
 	if handlers, ok := s.handlers[event.EventType]; ok {
-		inserter := InsertTxWrapper{e: e, s: s}
+		//inserter := InsertTxWrapper{e: e, s: s}
 		for _, handler := range handlers {
-			err := (*handler)(event, inserter, replay)
+			err := (*handler)(event, replay)
 			if err != nil {
 				return fmt.Errorf("handler for %s failed: %w", event.EventType, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *Service) xrunEventHandlers(event Event, replay bool) error {
+	if handlers, ok := s.xhandlers[event.EventType]; ok {
+		for _, handler := range handlers {
+			var sagaInstanceID int
+			err := s.db.Get(&sagaInstanceID, `insert into saga_instances(event_id, saga_name, status) values(?,?,?) returning saga_instance_id`, event.EventID, handler.Name, "running")
+			if err != nil {
+				return fmt.Errorf("error creating saga instance: %w", err)
+			}
+			err = handler.HandlerFunc(event, replay)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "SAGA FAIL %v | %v: %s\n", event, handler, err)
+				_, err = s.db.Exec(`update saga_instances set status = 'error', last_error = ?, updated_at = ? where saga_instance_id = ?`,
+					err.Error(), time.Now(), sagaInstanceID)
+				if err != nil {
+					return fmt.Errorf("error updating saga instance with error: %w", err)
+				}
+			} else {
+				_, err = s.db.Exec(`update saga_instances set status = 'completed', updated_at = ? where saga_instance_id = ?`, time.Now(), sagaInstanceID)
+				if err != nil {
+					return fmt.Errorf("error updating saga instance as completed: %w", err)
+				}
 			}
 		}
 	}
@@ -235,7 +290,7 @@ func (s *Service) Replay() error {
 	}
 
 	for i, event := range events {
-		err := s.runEventHandlers(s.db, event, true)
+		err := s.runEventHandlers(event, true)
 		if err != nil {
 			return fmt.Errorf("replay failed at event %d (%s): %w", i, event.EventType, err)
 		}
