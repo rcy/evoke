@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -123,8 +125,12 @@ func (s *Service) Close() error {
 
 // Event payloads must implement this interface
 type EventDefinition interface {
-	EventType() string
 	Aggregate() string
+}
+
+// Implement this interface in an event definition to override the event type
+type ExplicitEventType interface {
+	EventType() string
 }
 
 type Inserter interface {
@@ -139,15 +145,26 @@ type ExecGetter interface {
 
 type HandlerFunc func(event Event, replay bool) error
 
+func eventTypeOf(e any) string {
+	if ee, ok := e.(ExplicitEventType); ok {
+		return ee.EventType()
+	}
+	t := reflect.TypeOf(e)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Name()
+}
+
 // Subscribe to event and have handler run inside event insert transaction
 func (s *Service) SubscribeSync(payload EventDefinition, handler HandlerFunc) {
-	key := payload.EventType()
+	key := eventTypeOf(payload)
 	s.handlers[key] = append(s.handlers[key], &handler)
 }
 
 // Subscribe to event and have handler run outside event insert transaction
 func (s *Service) Subscribe(name string, payload EventDefinition, handler HandlerFunc) {
-	key := payload.EventType()
+	key := eventTypeOf(payload)
 	s.xhandlers[key] = append(s.xhandlers[key], &SagaHandler{Name: name, HandlerFunc: handler})
 }
 
@@ -201,6 +218,13 @@ func (s *Service) LoadAllEvents(reverse bool) ([]Event, error) {
 	return events, nil
 }
 
+func (s *Service) MustInsert(aggregateID string, payload EventDefinition) {
+	err := s.Insert(aggregateID, payload)
+	if err != nil {
+		log.Fatal("MustInsert: %s %v %w", aggregateID, payload, err)
+	}
+}
+
 func (s *Service) Insert(aggregateID string, payload EventDefinition) error {
 	tx, err := s.db.Beginx()
 	if err != nil {
@@ -217,7 +241,7 @@ func (s *Service) Insert(aggregateID string, payload EventDefinition) error {
 	err = tx.Get(&event, `insert into events(aggregate_id, aggregate_type, event_type, event_data) values (?,?,?,?) returning *`,
 		aggregateID,
 		payload.Aggregate(),
-		payload.EventType(),
+		eventTypeOf(payload),
 		string(bytes)) // Q: why string bytes? sqlite thing?
 	if err != nil {
 		return fmt.Errorf("db.Exec: %w", err)
