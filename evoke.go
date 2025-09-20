@@ -145,7 +145,7 @@ type ExecGetter interface {
 
 type HandlerFunc func(event Event, replay bool) error
 
-func eventTypeOf(e any) string {
+func EventTypeOf(e any) string {
 	if ee, ok := e.(ExplicitEventType); ok {
 		return ee.EventType()
 	}
@@ -158,13 +158,13 @@ func eventTypeOf(e any) string {
 
 // Subscribe to event and have handler run inside event insert transaction
 func (s *Service) SubscribeSync(payload EventDefinition, handler HandlerFunc) {
-	key := eventTypeOf(payload)
+	key := EventTypeOf(payload)
 	s.handlers[key] = append(s.handlers[key], &handler)
 }
 
 // Subscribe to event and have handler run outside event insert transaction
 func (s *Service) Subscribe(name string, payload EventDefinition, handler HandlerFunc) {
-	key := eventTypeOf(payload)
+	key := EventTypeOf(payload)
 	s.xhandlers[key] = append(s.xhandlers[key], &SagaHandler{Name: name, HandlerFunc: handler})
 }
 
@@ -241,7 +241,7 @@ func (s *Service) Insert(aggregateID string, payload EventDefinition) error {
 	err = tx.Get(&event, `insert into events(aggregate_id, aggregate_type, event_type, event_data) values (?,?,?,?) returning *`,
 		aggregateID,
 		payload.Aggregate(),
-		eventTypeOf(payload),
+		EventTypeOf(payload),
 		string(bytes)) // Q: why string bytes? sqlite thing?
 	if err != nil {
 		return fmt.Errorf("db.Exec: %w", err)
