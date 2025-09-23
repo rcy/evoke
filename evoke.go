@@ -156,6 +156,11 @@ func EventTypeOf(e any) string {
 	return t.Name()
 }
 
+type Subscriber interface {
+	SubscribeSync(payload EventDefinition, handler HandlerFunc)
+	Subscribe(name string, payload EventDefinition, handler HandlerFunc)
+}
+
 // Subscribe to event and have handler run inside event insert transaction
 func (s *Service) SubscribeSync(payload EventDefinition, handler HandlerFunc) {
 	key := EventTypeOf(payload)
