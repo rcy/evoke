@@ -1,6 +1,10 @@
 package evoke
 
-import "github.com/google/uuid"
+import (
+	"fmt"
+
+	"github.com/google/uuid"
+)
 
 type AggregateHandler struct {
 	aggregateFactory func(id uuid.UUID) Aggregate
@@ -26,16 +30,18 @@ func (h *AggregateHandler) Handle(cmd Command) error {
 
 	// rehydrate aggregate from store
 	agg := h.aggregateFactory(aggID)
-	if events, err := h.store.LoadStream(aggID); err == nil {
-		for _, re := range events {
-			agg.Apply(re.Event)
-		}
+	events, err := h.store.LoadStream(aggID)
+	if err != nil {
+		return fmt.Errorf("LoadStream(%s): %w", aggID, err)
+	}
+	for _, re := range events {
+		agg.Apply(re.Event)
 	}
 
 	// handle command
 	newEvents, err := agg.HandleCommand(cmd)
 	if err != nil {
-		return err
+		return fmt.Errorf("%T.HandleCommand(%T): error: %w", agg, cmd, err)
 	}
 
 	// persist

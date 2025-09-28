@@ -129,8 +129,6 @@ func (s *fileStore) appendEvents(aggregateID uuid.UUID, evs []Event) ([]Recorded
 			return nil, fmt.Errorf("getRecordedEvent: %w", err)
 		}
 
-		fmt.Println("filestore rec", rec)
-
 		out = append(out, rec)
 	}
 	return out, nil
@@ -142,8 +140,8 @@ func (s *fileStore) Record(aggregateID uuid.UUID, evs []Event) error {
 		return err
 	}
 
-	for _, p := range s.publishers {
-		for _, rec := range recs {
+	for _, rec := range recs {
+		for _, p := range s.publishers {
 			err := p.Publish(rec, false)
 			if err != nil {
 				return fmt.Errorf("publish: %w", err)
@@ -157,12 +155,22 @@ func (s *fileStore) Record(aggregateID uuid.UUID, evs []Event) error {
 func (s *fileStore) LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var events []RecordedEvent
-	err := s.db.Select(&events, `select * from events where aggregate_id = ? order by sequence asc`, aggregateID.String())
+	var rows []dbEvent
+	err := s.db.Select(&rows, `select * from events where aggregate_id = ? order by sequence asc`, aggregateID.String())
 	if err != nil {
 		return nil, fmt.Errorf("select from events: %w", err)
 	}
-	return events, nil
+
+	recs := make([]RecordedEvent, len(rows))
+	for _, row := range rows {
+		rec, err := row.UnmarshalFromRegistry(s)
+		if err != nil {
+			return nil, fmt.Errorf("getRecordedEvent: %w", err)
+		}
+		recs = append(recs, rec)
+	}
+
+	return recs, nil
 }
 
 func (s *fileStore) ReplayFrom(seq int64, publisher RecordedEventPublisher) error {

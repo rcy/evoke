@@ -31,7 +31,7 @@ func (b *simpleCommandBus) Send(cmd Command) error {
 	h, ok := b.handlers[TypeName(cmd)]
 	b.mu.RUnlock()
 	if !ok {
-		return fmt.Errorf("no handler for command %s", TypeName(cmd))
+		return fmt.Errorf("simpleCommandBus: command not registered: %s (hint: call RegisterHandler)", TypeName(cmd))
 	}
 	return h.Handle(cmd)
 }

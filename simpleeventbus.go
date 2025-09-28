@@ -1,6 +1,7 @@
 package evoke
 
 import (
+	"fmt"
 	"sync"
 )
 
@@ -15,16 +16,20 @@ func NewEventBus() *simpleEventBus {
 	}
 }
 
-func (b *simpleEventBus) Subscribe(eventType string, handler EventHandler) {
+func (b *simpleEventBus) Subscribe(evt Event, handler EventHandler) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.subscribers[eventType] = append(b.subscribers[eventType], handler)
+	b.subscribers[TypeName(evt)] = append(b.subscribers[TypeName(evt)], handler)
 }
 
 func (b *simpleEventBus) Publish(evt RecordedEvent, replay bool) error {
 	b.mu.RLock()
-	handlers := b.subscribers[TypeName(evt.Event)]
+	handlers, ok := b.subscribers[TypeName(evt.Event)]
 	b.mu.RUnlock()
+	if !ok {
+		fmt.Printf("WARN: simpleEventBus.Publish: no subscriptions on %T\n", evt.Event)
+		return nil
+	}
 	for _, h := range handlers {
 		err := h.Handle(evt.Event, replay)
 		if err != nil {

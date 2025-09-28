@@ -66,13 +66,14 @@ func (s *simpleStore) Record(aggregateID uuid.UUID, evs []Event) error {
 		return err
 	}
 
-	for _, p := range s.publishers {
-		for _, rec := range recs {
+	for _, rec := range recs {
+		for _, p := range s.publishers {
 			err := p.Publish(rec, false)
 			if err != nil {
 				return fmt.Errorf("publish: %w", err)
 			}
 		}
+
 	}
 
 	return nil

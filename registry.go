@@ -31,7 +31,7 @@ func (er *EventRegistry) registerEvent(eventType string, ctor func() Event) {
 func (er *EventRegistry) UnmarshalEvent(eventType string, data []byte) (Event, error) {
 	ctor, ok := er.registry[eventType]
 	if !ok {
-		return nil, fmt.Errorf("unknown event type %q", eventType)
+		return nil, fmt.Errorf("event not registered %q (hint call evoke.RegisterEvent(...)", eventType)
 	}
 	e := ctor()
 	if err := json.Unmarshal(data, e); err != nil {
