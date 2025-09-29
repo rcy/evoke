@@ -34,16 +34,20 @@ type CommandSender interface {
 
 type EventStore interface {
 	Record(aggregateID uuid.UUID, evs []Event) error
+	MustRecord(aggregateID uuid.UUID, evs []Event)
 	LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error)
-	ReplayFrom(seq int64, publisher RecordedEventPublisher) error
+	ReplayFrom(seq int64, handler RecordedEventHandlerFunc) error
 	RegisterPublisher(publisher RecordedEventPublisher)
 }
 
+// Events are whatever you want them to be
 type Event interface{}
 
 type EventHandler interface {
 	Handle(Event, bool) error
 }
+
+type RecordedEventHandlerFunc func(rec RecordedEvent, replay bool) error
 
 type RecordedEventPublisher interface {
 	Publish(rec RecordedEvent, replay bool) error
@@ -55,8 +59,8 @@ type EventBus interface {
 }
 
 type RecordedEvent struct {
-	Sequence int64
-	//Timestamp   time.Time `db:"timestamp"`
+	Sequence    int64
+	RecordedAt  int64
 	AggregateID uuid.UUID
 	Event       Event
 	EventType   string
@@ -64,5 +68,5 @@ type RecordedEvent struct {
 
 type Aggregate interface {
 	HandleCommand(cmd Command) ([]Event, error)
-	Apply(e Event)
+	Apply(e Event) error
 }

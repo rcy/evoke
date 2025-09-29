@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -52,6 +53,7 @@ func NewFileStore(dbFile string) (*fileStore, error) {
 	if _, err := db.Exec(`
 		create table if not exists events (
 			sequence     integer primary key autoincrement,
+                        recorded_at  integer not null,
                         aggregate_id text not null,
                         event_type   text not null,
                         event_json   text not null
@@ -68,6 +70,10 @@ func NewFileStore(dbFile string) (*fileStore, error) {
 	}, nil
 }
 
+func (s *fileStore) Close() error {
+	return s.db.Close()
+}
+
 func (s *fileStore) RegisterPublisher(publisher RecordedEventPublisher) {
 	s.publishers = append(s.publishers, publisher)
 }
@@ -80,8 +86,8 @@ func (s *fileStore) DebugEvents() ([]RecordedEvent, error) {
 }
 
 type dbEvent struct {
-	Sequence int64 `db:"sequence"`
-	//Timestamp   time.Time `db:"timestamp"`
+	Sequence    int64     `db:"sequence"`
+	RecordedAt  int64     `db:"recorded_at"`
 	AggregateID uuid.UUID `db:"aggregate_id"`
 	EventJSON   string    `db:"event_json"`
 	EventType   string    `db:"event_type"`
@@ -94,8 +100,8 @@ func (e *dbEvent) UnmarshalFromRegistry(s EventRegisterer) (RecordedEvent, error
 	}
 
 	return RecordedEvent{
-		Sequence: e.Sequence,
-		//Timestamp   time.Time `db:"timestamp"`
+		Sequence:    e.Sequence,
+		RecordedAt:  e.RecordedAt,
 		AggregateID: e.AggregateID,
 		EventType:   e.EventType,
 		Event:       event,
@@ -118,8 +124,11 @@ func (s *fileStore) appendEvents(aggregateID uuid.UUID, evs []Event) ([]Recorded
 		}
 
 		var row dbEvent
-		err = s.db.Get(&row, `insert into events(aggregate_id, event_json, event_type) values(?,?,?) returning *`,
-			aggregateID, string(eventBytes), TypeName(e))
+		err = s.db.Get(&row, `insert into events(aggregate_id, recorded_at, event_json, event_type) values(?,?,?,?) returning *`,
+			aggregateID,
+			time.Now().Unix(),
+			string(eventBytes),
+			TypeName(e))
 		if err != nil {
 			return nil, fmt.Errorf("insert into events: %w", err)
 		}
@@ -152,7 +161,16 @@ func (s *fileStore) Record(aggregateID uuid.UUID, evs []Event) error {
 	return nil
 }
 
+func (s *fileStore) MustRecord(aggregateID uuid.UUID, evs []Event) {
+	err := s.Record(aggregateID, evs)
+	if err != nil {
+		panic(err)
+	}
+}
+
 func (s *fileStore) LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error) {
+	fmt.Println("DEBUGX 3zqn 6 LoadStream", aggregateID)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var rows []dbEvent
@@ -162,18 +180,20 @@ func (s *fileStore) LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error) {
 	}
 
 	recs := make([]RecordedEvent, len(rows))
-	for _, row := range rows {
+	for i, row := range rows {
 		rec, err := row.UnmarshalFromRegistry(s)
 		if err != nil {
 			return nil, fmt.Errorf("getRecordedEvent: %w", err)
 		}
-		recs = append(recs, rec)
+		recs[i] = rec
 	}
+
+	fmt.Println("DEBUGX xWax 7 LoadStream", len(recs))
 
 	return recs, nil
 }
 
-func (s *fileStore) ReplayFrom(seq int64, publisher RecordedEventPublisher) error {
+func (s *fileStore) ReplayFrom(seq int64, handler RecordedEventHandlerFunc) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -188,7 +208,7 @@ func (s *fileStore) ReplayFrom(seq int64, publisher RecordedEventPublisher) erro
 		if err != nil {
 			return fmt.Errorf("recordedEvent: %w", err)
 		}
-		err = publisher.Publish(rec, true)
+		err = handler(rec, true)
 		if err != nil {
 			return fmt.Errorf("callback error: %w", err)
 		}

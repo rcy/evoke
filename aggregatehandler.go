@@ -30,12 +30,16 @@ func (h *AggregateHandler) Handle(cmd Command) error {
 
 	// rehydrate aggregate from store
 	agg := h.aggregateFactory(aggID)
-	events, err := h.store.LoadStream(aggID)
+	recs, err := h.store.LoadStream(aggID)
 	if err != nil {
 		return fmt.Errorf("LoadStream(%s): %w", aggID, err)
 	}
-	for _, re := range events {
-		agg.Apply(re.Event)
+
+	for _, rec := range recs {
+		err := agg.Apply(rec.Event)
+		if err != nil {
+			return fmt.Errorf("Apply(%T): %w", rec.Event, err)
+		}
 	}
 
 	// handle command
