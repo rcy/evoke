@@ -80,9 +80,13 @@ func (s *fileStore) RegisterPublisher(publisher RecordedEventPublisher) {
 
 // Return all events, not really a long term method here
 func (s *fileStore) DebugEvents() ([]RecordedEvent, error) {
-	var events []RecordedEvent
-	s.db.Select(&events, `select * from events order by sequence asc`)
-	return events, nil
+	var events []dbEvent
+	err := s.db.Select(&events, `select * from events order by sequence asc`)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.buildRecordedEvents(events)
 }
 
 type dbEvent struct {
@@ -168,9 +172,8 @@ func (s *fileStore) MustRecord(aggregateID uuid.UUID, evs []Event) {
 	}
 }
 
+// Returns all events for a given aggregate
 func (s *fileStore) LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error) {
-	fmt.Println("DEBUGX 3zqn 6 LoadStream", aggregateID)
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var rows []dbEvent
@@ -179,6 +182,16 @@ func (s *fileStore) LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error) {
 		return nil, fmt.Errorf("select from events: %w", err)
 	}
 
+	recs, err := s.buildRecordedEvents(rows)
+	if err != nil {
+		return nil, fmt.Errorf("buildRecordedEvents: %w", err)
+	}
+
+	return recs, nil
+}
+
+// return a slice of RecordedEvents built from a slice of dbEvents
+func (s *fileStore) buildRecordedEvents(rows []dbEvent) ([]RecordedEvent, error) {
 	recs := make([]RecordedEvent, len(rows))
 	for i, row := range rows {
 		rec, err := row.UnmarshalFromRegistry(s)
@@ -187,9 +200,6 @@ func (s *fileStore) LoadStream(aggregateID uuid.UUID) ([]RecordedEvent, error) {
 		}
 		recs[i] = rec
 	}
-
-	fmt.Println("DEBUGX xWax 7 LoadStream", len(recs))
-
 	return recs, nil
 }
 
